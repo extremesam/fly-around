@@ -1,0 +1,385 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Dawn Fly-around: Statue of Liberty</title>
+    <script src="https://cdn.jsdelivr.net/npm/@tailwindcss/browser@4"></script>
+    <style>
+        body { margin: 0; overflow: hidden; background-color: #000; font-family: 'Inter', sans-serif; }
+        #canvas-container { width: 100vw; height: 100vh; }
+        .ui-overlay {
+            position: absolute;
+            top: 2rem;
+            left: 2rem;
+            color: white;
+            pointer-events: none;
+            text-shadow: 0 2px 4px rgba(0,0,0,0.5);
+        }
+        .loading-screen {
+            position: fixed;
+            top: 0; left: 0; width: 100%; height: 100%;
+            background: #050b14;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 1000;
+            transition: opacity 1s ease-out;
+        }
+        .spinner {
+            width: 50px;
+            height: 50px;
+            border: 3px solid rgba(255,255,255,0.3);
+            border-radius: 50%;
+            border-top-color: #ffd700;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+    <div id="loading-screen" class="loading-screen">
+        <div class="spinner"></div>
+        <p class="text-white mt-4 font-light tracking-widest uppercase text-sm">Approaching Liberty Island...</p>
+    </div>
+
+    <div class="ui-overlay">
+        <h1 class="text-4xl font-bold tracking-tighter opacity-80">LIBERTY AT DAWN</h1>
+        <p class="text-sm font-light tracking-widest uppercase opacity-60">New York Harbor • 5:42 AM</p>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+        import { Water } from 'three/addons/objects/Water.js';
+        import { Sky } from 'three/addons/objects/Sky.js';
+
+        let scene, camera, renderer, water, sky, sun, controls;
+        let statueGroup, boat;
+
+        init();
+        animate();
+
+        function init() {
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.toneMapping = THREE.ACESFilmicToneMapping;
+            renderer.shadowMap.enabled = true;
+            document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+            // Scene
+            scene = new THREE.Scene();
+            scene.fog = new THREE.FogExp2(0x1a2133, 0.002);
+
+            // Camera
+            camera = new THREE.PerspectiveCamera(55, window.innerWidth / window.innerHeight, 1, 20000);
+            camera.position.set(150, 80, 450);
+
+            // Sun / Lighting
+            sun = new THREE.Vector3();
+
+            // Water
+            const waterGeometry = new THREE.PlaneGeometry(10000, 10000);
+            water = new Water(
+                waterGeometry,
+                {
+                    textureWidth: 512,
+                    textureHeight: 512,
+                    waterNormals: new THREE.TextureLoader().load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/waternormals.jpg', function (texture) {
+                        texture.wrapS = texture.wrapT = THREE.RepeatWrapping;
+                    }),
+                    sunDirection: new THREE.Vector3(),
+                    sunColor: 0xffffff,
+                    waterColor: 0x001e0f,
+                    distortionScale: 3.7,
+                    fog: scene.fog !== undefined
+                }
+            );
+            water.rotation.x = -Math.PI / 2;
+            scene.add(water);
+
+            // Sky
+            sky = new Sky();
+            sky.scale.setScalar(10000);
+            scene.add(sky);
+
+            const skyUniforms = sky.material.uniforms;
+            skyUniforms['turbidity'].value = 10;
+            skyUniforms['rayleigh'].value = 2;
+            skyUniforms['mieCoefficient'].value = 0.005;
+            skyUniforms['mieDirectionalG'].value = 0.8;
+
+            const parameters = {
+                elevation: 0.5,
+                azimuth: 175
+            };
+
+            const pmremGenerator = new THREE.PMREMGenerator(renderer);
+
+            function updateSun() {
+                const phi = THREE.MathUtils.degToRad(90 - parameters.elevation);
+                const theta = THREE.MathUtils.degToRad(parameters.azimuth);
+                sun.setFromSphericalCoords(1, phi, theta);
+                sky.material.uniforms['sunPosition'].value.copy(sun);
+                water.material.uniforms['sunDirection'].value.copy(sun).normalize();
+                
+                // Fine tune sky for dawn
+                sky.material.uniforms['turbidity'].value = 20;
+                sky.material.uniforms['rayleigh'].value = 3;
+                sky.material.uniforms['mieCoefficient'].value = 0.005;
+                sky.material.uniforms['mieDirectionalG'].value = 0.7;
+                
+                scene.environment = pmremGenerator.fromScene(sky).texture;
+            }
+            updateSun();
+
+            // Ambient Light
+            const ambientLight = new THREE.AmbientLight(0x404040, 0.5);
+            scene.add(ambientLight);
+
+            // Directional Light (Sun)
+            const dirLight = new THREE.DirectionalLight(0xffaa77, 1.5);
+            dirLight.position.copy(sun).multiplyScalar(1000);
+            dirLight.castShadow = true;
+            dirLight.shadow.camera.left = -200;
+            dirLight.shadow.camera.right = 200;
+            dirLight.shadow.camera.top = 200;
+            dirLight.shadow.camera.bottom = -200;
+            scene.add(dirLight);
+
+            // Liberty Island & Statue
+            createStatue();
+
+            // Manhattan Skyline
+            createSkyline();
+
+            // Boat
+            const boatGroup = new THREE.Group();
+            const boatHull = new THREE.Mesh(
+                new THREE.BoxGeometry(20, 5, 40),
+                new THREE.MeshStandardMaterial({ color: 0x222222 })
+            );
+            boatGroup.add(boatHull);
+            const boatCabin = new THREE.Mesh(
+                new THREE.BoxGeometry(12, 8, 15),
+                new THREE.MeshStandardMaterial({ color: 0xeeeeee })
+            );
+            boatCabin.position.y = 5;
+            boatGroup.add(boatCabin);
+            boat = boatGroup;
+            boat.position.set(400, 2, 200);
+            scene.add(boat);
+
+            // Controls
+            controls = new OrbitControls(camera, renderer.domElement);
+            controls.maxPolarAngle = Math.PI * 0.495;
+            controls.target.set(0, 80, 0);
+            controls.minDistance = 100.0;
+            controls.maxDistance = 1000.0;
+            controls.enableDamping = true;
+            controls.autoRotate = true;
+            controls.autoRotateSpeed = 0.5;
+
+            window.addEventListener('resize', onWindowResize);
+            
+            // Hide loader
+            setTimeout(() => {
+                document.getElementById('loading-screen').style.opacity = '0';
+                setTimeout(() => {
+                    document.getElementById('loading-screen').style.display = 'none';
+                }, 1000);
+            }, 2000);
+        }
+
+        function createStatue() {
+            statueGroup = new THREE.Group();
+
+            // Fort Wood (Star base)
+            const starShape = new THREE.Shape();
+            const points = 11;
+            const outerRadius = 70;
+            const innerRadius = 50;
+            for (let i = 0; i < points * 2; i++) {
+                const r = i % 2 === 0 ? outerRadius : innerRadius;
+                const a = (i / (points * 2)) * Math.PI * 2;
+                if (i === 0) starShape.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+                else starShape.lineTo(Math.cos(a) * r, Math.sin(a) * r);
+            }
+            const starGeo = new THREE.ExtrudeGeometry(starShape, { depth: 15, bevelEnabled: false });
+            const starMat = new THREE.MeshStandardMaterial({ color: 0x666666 });
+            const fort = new THREE.Mesh(starGeo, starMat);
+            fort.rotation.x = -Math.PI / 2;
+            fort.position.y = 10;
+            statueGroup.add(fort);
+
+            // Pedestal base
+            const baseMat = new THREE.MeshStandardMaterial({ color: 0x999995, roughness: 0.8 });
+            const base = new THREE.Mesh(new THREE.BoxGeometry(45, 60, 45), baseMat);
+            base.position.y = 40;
+            base.castShadow = true;
+            base.receiveShadow = true;
+            statueGroup.add(base);
+
+            // Island
+            const islandGeo = new THREE.CylinderGeometry(180, 190, 5, 32);
+            const islandMat = new THREE.MeshStandardMaterial({ color: 0x1a251a });
+            const island = new THREE.Mesh(islandGeo, islandMat);
+            island.position.y = 2.5;
+            scene.add(island);
+
+            // Statue Body (Stylized)
+            const statueMat = new THREE.MeshStandardMaterial({ 
+                color: 0x6e9a8e, 
+                roughness: 0.5,
+                metalness: 0.3
+            });
+
+            const body = new THREE.Mesh(new THREE.CylinderGeometry(7, 10, 65, 12), statueMat);
+            body.position.y = 100;
+            body.castShadow = true;
+            statueGroup.add(body);
+
+            // Head
+            const head = new THREE.Mesh(new THREE.BoxGeometry(7, 9, 7), statueMat);
+            head.position.y = 135;
+            statueGroup.add(head);
+
+            // Crown spikes
+            for(let i=0; i<7; i++) {
+                const spike = new THREE.Mesh(new THREE.ConeGeometry(0.8, 7, 4), statueMat);
+                spike.position.y = 139;
+                const angle = (i / 6) * Math.PI - Math.PI/2;
+                spike.position.x = Math.sin(angle) * 4.5;
+                spike.position.z = Math.cos(angle) * 4.5;
+                spike.rotation.x = Math.PI/2;
+                spike.rotation.z = -angle;
+                statueGroup.add(spike);
+            }
+
+            // Arm (Holding Torch)
+            const arm = new THREE.Mesh(new THREE.CylinderGeometry(2, 1.5, 35), statueMat);
+            arm.position.set(10, 140, 0);
+            arm.rotation.z = -Math.PI / 6;
+            statueGroup.add(arm);
+
+            // Torch
+            const torchGeo = new THREE.ConeGeometry(2, 5, 8);
+            const torchMat = new THREE.MeshStandardMaterial({ color: 0xffcc00, emissive: 0xffaa00 });
+            const torch = new THREE.Mesh(torchGeo, torchMat);
+            torch.position.set(18, 155, 0);
+            statueGroup.add(torch);
+
+            const torchLight = new THREE.PointLight(0xffaa00, 500, 100);
+            torchLight.position.set(18, 160, 0);
+            statueGroup.add(torchLight);
+
+            // Book arm
+            const bookArm = new THREE.Mesh(new THREE.CylinderGeometry(1.8, 1.8, 22), statueMat);
+            bookArm.position.set(-8, 115, 3);
+            bookArm.rotation.z = Math.PI/4;
+            statueGroup.add(bookArm);
+
+            // Book
+            const book = new THREE.Mesh(new THREE.BoxGeometry(4, 8, 2), statueMat);
+            book.position.set(-15, 125, 4);
+            book.rotation.z = Math.PI/4;
+            statueGroup.add(book);
+
+            scene.add(statueGroup);
+        }
+
+        function createSkyline() {
+            // Manhattan
+            const manhattan = new THREE.Group();
+            manhattan.position.set(200, 0, -1800);
+            
+            const jersey = new THREE.Group();
+            jersey.position.set(-1800, 0, -200);
+            jersey.rotation.y = Math.PI / 2;
+
+            const createCluster = (group, count, spreadX, spreadZ) => {
+                const buildingMat = new THREE.MeshStandardMaterial({ color: 0x0a0a10 });
+                for (let i = 0; i < count; i++) {
+                    const w = 30 + Math.random() * 50;
+                    const h = 100 + Math.pow(Math.random(), 3) * 800;
+                    const d = 30 + Math.random() * 50;
+                    
+                    const building = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), buildingMat);
+                    building.position.x = (Math.random() - 0.5) * spreadX;
+                    building.position.z = (Math.random() - 0.5) * spreadZ;
+                    building.position.y = h / 2;
+                    
+                    // Windows
+                    if (Math.random() > 0.2) {
+                        const winGeo = new THREE.PlaneGeometry(w * 0.7, h * 0.8);
+                        const winMat = new THREE.MeshBasicMaterial({ 
+                            color: 0xffddaa, 
+                            transparent: true, 
+                            opacity: 0.15 + Math.random() * 0.2
+                        });
+                        const windows = new THREE.Mesh(winGeo, winMat);
+                        windows.position.z = d/2 + 0.5;
+                        building.add(windows);
+                    }
+                    group.add(building);
+                }
+            };
+
+            createCluster(manhattan, 120, 1500, 500);
+            createCluster(jersey, 80, 1500, 400);
+
+            scene.add(manhattan);
+            scene.add(jersey);
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            requestAnimationFrame(animate);
+            render();
+        }
+
+        function render() {
+            const time = performance.now() * 0.001;
+            
+            water.material.uniforms['time'].value += 1.0 / 60.0;
+            
+            // Subtle statue sway
+            if (statueGroup) {
+                statueGroup.rotation.y = Math.sin(time * 0.2) * 0.015;
+            }
+
+            // Boat movement
+            if (boat) {
+                boat.position.z -= 0.2;
+                boat.position.y = 2 + Math.sin(time * 0.5) * 0.5;
+                if (boat.position.z < -1000) boat.position.z = 1000;
+            }
+
+            // Cinematic camera adjustment
+            camera.position.y += Math.sin(time * 0.3) * 0.05;
+
+            controls.update();
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
